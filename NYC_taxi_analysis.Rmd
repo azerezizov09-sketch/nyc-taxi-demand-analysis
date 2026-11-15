@@ -1,0 +1,299 @@
+---
+title: "Hourly and Daily Demand Pattern Analysis for NYC Taxi Trips"
+author: "AzizovA"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## Giriş
+
+Bu analizdə NYC taksi səfərləri datasında (Kaggle: *NYC Taxi Trip Duration*, `train.csv`) tələbatın saat, həftənin günü və ay üzrə necə dəyişdiyi öyrənilir. Analiz **R dilində** aparılıb
+
+## Setup 
+
+```{r setup, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+library(tidyverse)   
+library(lubridate)  
+library(scales) 
+
+
+dir.create("figures", showWarnings = FALSE)
+
+df=read.csv("NYC.csv")
+```
+
+
+## Datanın ilkin yoxlanışı
+
+```{r check, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+dim(df)                 # sətir və sütun sayı
+glimpse(df)             # sütun tipləri
+colSums(is.na(df))      # hər sütunda boş (missing) dəyər sayı
+```
+
+
+
+## pickup_datetime-ı datetime tipinə çevirmək
+
+```{r task1, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+df <- df %>%
+  mutate(pickup_datetime = ymd_hms(pickup_datetime))
+
+class(df$pickup_datetime)   
+
+#Müddəti dəqiqəyə çevirmək
+df <- df %>%
+  mutate(trip_duration_min = trip_duration / 60)
+
+summary(df$trip_duration_min)
+
+```
+
+**Şərh:** `pickup_datetime` mətn tipindən `POSIXct` tipinə çevrilir ki, saat və gün çıxarmaq mümkün olsun. `trip_duration` saniyə ilədir, 60-a bölünərək dəqiqəyə çevrilir. `summary` çıxışında maksimum dəyərin çox böyük olması outlier-lərin olduğunu göstərir.
+
+## Outlier filtri (1 dəq-dən az, 120 dəq-dən çox)
+
+
+```{r task2, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+n_before <- nrow(df)
+
+cat("1 dəq-dən qısa:", sum(df$trip_duration_min < 1), "\n")
+cat("120 dəq-dən uzun:", sum(df$trip_duration_min > 120), "\n")
+
+df_clean <- df %>%
+  filter(trip_duration_min >= 1, trip_duration_min <= 120)
+
+n_after   <- nrow(df_clean)
+n_removed <- n_before - n_after
+cat("Silinən sətir:", n_removed, "(", round(n_removed / n_before * 100, 2), "% )\n")
+cat("Qalan sətir:", n_after, "\n")
+
+# Filtrdən əvvəl və sonra müqayisə (tapşırıq "impact" istəyir)
+tibble(
+  dataset = c("Əvvəl", "Sonra"),
+  mean_min = c(mean(df$trip_duration_min), mean(df_clean$trip_duration_min)),
+  median_min = c(median(df$trip_duration_min), median(df_clean$trip_duration_min)),
+  max_min = c(max(df$trip_duration_min), max(df_clean$trip_duration_min))
+)
+
+```
+
+**Şərh:**  1 dəqiqədən qısa və 120 dəqiqədən uzun səfərlər silinir. Neçə sətrin silindiyi və filtrdən əvvəl/sonra orta, median, maksimum müqayisə edilir. Ortalama və maksimumun kəskin dəyişməsi outlier-lərin təsirini göstərir, median isə az dəyişir.
+
+## Zaman komponentləri
+
+
+```{r task3, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+wd_levels <- c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday")
+
+df_clean <- df_clean %>%
+  mutate(
+    hour        = hour(pickup_datetime),
+    weekday_num = wday(pickup_datetime, week_start = 1),   # 1 = Monday
+    weekday     = factor(weekday_num, levels = 1:7, labels = wd_levels),
+    month       = month(pickup_datetime),
+    day_type    = if_else(weekday_num >= 6, "Weekend", "Weekday")
+  )
+
+# Yoxlama
+df_clean %>% select(pickup_datetime, hour, weekday, month, day_type) %>% head()
+range(df_clean$pickup_datetime)   # data hansı aralığı əhatə edir
+```
+
+**Şərh:** Saat, həftənin günü (Bazar ertəsi = 1), ay və iş günü/həftə sonu sütunları çıxarılır. `range` datanın hansı tarixləri əhatə etdiyini göstərir 
+
+## Saat üzrə səfər sayı + line chart
+
+
+```{r task4, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+hourly <- df_clean %>% count(hour, name = "trips")
+
+peak     <- hourly %>% slice_max(trips, n = 3)   
+off_peak <- hourly %>% slice_min(trips, n = 3)  
+peak; off_peak
+
+p1 <- ggplot(hourly, aes(hour, trips)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue") +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Trips by Hour of Day", x = "Hour", y = "Number of trips") +
+  theme_minimal()
+
+p1
+ggsave("figures/01_trips_by_hour.png", p1, width = 9, height = 5, dpi = 150)
+
+```
+
+**Şərh:** Hər saat üçün səfər sayı hesablanır, ən yüksək (peak) və ən aşağı (off-peak) 3 saat tapılır və line chart çəkilir. 
+
+## Həftənin günü üzrə səfər sayı + bar chart
+
+
+```{r task5, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+weekly <- df_clean %>% count(weekday, name = "trips")
+weekly
+
+p2 <- ggplot(weekly, aes(weekday, trips)) +
+  geom_col(fill = "darkorange") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Trips by Day of Week", x = NULL, y = "Number of trips") +
+  theme_minimal()
+
+p2
+ggsave("figures/02_trips_by_weekday.png", p2, width = 9, height = 5, dpi = 150)
+
+#Weekday vs weekend müqayisəsi: 5 iş günü ilə 2 həftə sonunu birbaşa toplayıb müqayisə etmək düzgün deyil. Ona görə gündəlik orta götürürəm:
+daily_by_type <- df_clean %>%
+  mutate(date = as_date(pickup_datetime)) %>%
+  count(date, day_type, name = "trips") %>%
+  group_by(day_type) %>%
+  summarise(avg_trips_per_day = mean(trips), .groups = "drop")
+
+daily_by_type
+
+# Həftə içi / həftə sonu saatlıq profil fərqi (insight üçün faydalıdır)
+hourly_by_type <- df_clean %>%
+  count(hour, day_type, name = "trips")
+
+p_type <- ggplot(hourly_by_type, aes(hour, trips, color = day_type)) +
+  geom_line(linewidth = 1) +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Hourly Demand: Weekday vs Weekend", x = "Hour", y = "Trips", color = NULL) +
+  theme_minimal()
+
+p_type
+ggsave("figures/08_hourly_weekday_vs_weekend.png", p_type, width = 9, height = 5, dpi = 150)
+```
+
+**Şərh:** Həftənin günləri üzrə səfər sayı bar chart ilə göstərilir. İş günü ilə həftə sonu **gündəlik orta** ilə müqayisə olunur (5 gün ilə 2 günü birbaşa toplamaq düzgün olmazdı). Sonuncu qrafik iki gün tipinin saatlıq tələbat profilini göstərir, yəni tələbatın zirvəsinin həftə sonu fərqli saatda olub-olmadığını görmək olur.
+
+## Saat üzrə orta səfər müddəti
+
+
+```{r task6, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+
+avg_dur_hour <- df_clean %>%
+  group_by(hour) %>%
+  summarise(avg_duration_min = mean(trip_duration_min),
+            median_duration_min = median(trip_duration_min),
+            .groups = "drop")
+
+avg_dur_hour
+
+p_dur_hour <- ggplot(avg_dur_hour, aes(hour, avg_duration_min)) +
+  geom_line(color = "firebrick", linewidth = 1) +
+  geom_point(color = "firebrick") +
+  scale_x_continuous(breaks = 0:23) +
+  labs(title = "Average Trip Duration by Hour", x = "Hour", y = "Minutes") +
+  theme_minimal()
+
+p_dur_hour
+ggsave("figures/05_avg_duration_by_hour.png", p_dur_hour, width = 9, height = 5, dpi = 150)
+```
+
+**Şərh:** Hər saat üçün orta və median səfər müddəti hesablanır. Müddətin uzandığı saatlar adətən tıxac saatlarıdır, bu isə fleet planlaşdırması üçün vacib insight-dır (eyni səfər daha çox vaxt aparır, yəni maşın daha az səfər edə bilir).
+
+## Səfər müddəti histoqramı
+
+
+```{r task7, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+p3 <- ggplot(df_clean, aes(trip_duration_min)) +
+  geom_histogram(binwidth = 2, fill = "seagreen", color = "white") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Distribution of Trip Duration (1–120 min)",
+       x = "Duration (minutes)", y = "Number of trips") +
+  theme_minimal()
+
+p3
+ggsave("figures/03_duration_histogram.png", p3, width = 9, height = 5, dpi = 150)
+
+# note üçün ümumi statistika
+df_clean %>%
+  summarise(mean = mean(trip_duration_min),
+            median = median(trip_duration_min),
+            sd = sd(trip_duration_min),
+            q25 = quantile(trip_duration_min, .25),
+            q75 = quantile(trip_duration_min, .75))
+```
+
+**Şərh:** Filtrdən sonra səfər müddətlərinin paylanması göstərilir (2 dəqiqəlik aralıqlarla). Paylanma adətən sağa uzanan olur: çox sayda qısa səfər, az sayda uzun səfər. Bu səbəbdən ortalama medianın üstündə çıxır. 
+
+## Aylıq trend (bar chart)
+
+
+```{r task8, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+monthly <- df_clean %>% count(month, name = "trips")
+monthly
+
+p4 <- ggplot(monthly, aes(factor(month), trips)) +
+  geom_col(fill = "purple4") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Monthly Trip Count", x = "Month", y = "Number of trips") +
+  theme_minimal()
+
+p4
+ggsave("figures/04_monthly_trips.png", p4, width = 9, height = 5, dpi = 150)
+
+# Aylıq orta müddət (note-dakı "aprel" iddiasını yoxlamaq üçün)
+df_clean %>%
+  group_by(month) %>%
+  summarise(avg_duration_min = mean(trip_duration_min), .groups = "drop")
+```
+
+**Şərh:** Aylıq səfər sayı bar chart ilə göstərilir. Data cəmi 6 aylıq olduğu üçün bu, tam mövsümilik yox, qısa dövr tendensiyasıdır. Aylıq orta müddət cədvəli hansı ayın ən uzun səfərlərə malik olduğunu göstərir.
+
+## Heatmap (saat × gün)
+
+
+```{r task9, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+heat <- df_clean %>% count(hour, weekday, name = "trips")
+
+p_heat <- ggplot(heat, aes(weekday, factor(hour), fill = trips)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "magma", labels = comma) +
+  scale_y_discrete(limits = rev(as.character(0:23))) +   # 0 yuxarıda
+  labs(title = "Trip Count: Hour of Day vs Day of Week",
+       x = NULL, y = "Hour", fill = "Trips") +
+  theme_minimal()
+
+p_heat
+ggsave("figures/06_heatmap_hour_weekday.png", p_heat, width = 9, height = 7, dpi = 150)
+```
+
+**Şərh:** Bonus 1. Hər xana müəyyən saat və günün səfər sayını göstərir, rəng nə qədər açıqdırsa tələbat o qədər yüksəkdir. Bir qrafikdə həm saat, həm gün üzrə tələbatı görmək olur (məsələn, iş günlərinin axşam zirvəsi, həftə sonu gecə tələbatı).
+
+## Vendor 1 vs Vendor 2
+
+
+```{r task10, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+vendor_cmp <- df_clean %>%
+  group_by(vendor_id) %>%
+  summarise(trips = n(),
+            share_pct = n() / nrow(df_clean) * 100,
+            avg_duration_min = mean(trip_duration_min),
+            median_duration_min = median(trip_duration_min),
+            .groups = "drop")
+vendor_cmp
+
+p_vendor <- ggplot(vendor_cmp, aes(factor(vendor_id), avg_duration_min, fill = factor(vendor_id))) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = round(avg_duration_min, 1)), vjust = -0.5) +
+  labs(title = "Average Trip Duration by Vendor", x = "vendor_id", y = "Minutes") +
+  theme_minimal()
+
+p_vendor
+ggsave("figures/07_vendor_duration.png", p_vendor, width = 6, height = 5, dpi = 150)
+
+# fərq statistik əhəmiyyətlidirmi?
+t.test(trip_duration_min ~ vendor_id, data = df_clean)
+```
+
+**Şərh:** Bonus 2. İki vendor üçün səfər sayı, payı və orta/median müddət müqayisə olunur. `t.test` fərqin təsadüfi olub-olmadığını yoxlayır. 1,4 milyon sətirdə çox kiçik fərq də "statistik əhəmiyyətli" çıxa bilər, ona görə p-value ilə yanaşı fərqin praktik ölçüsünə (neçə dəqiqə) də baxmaq lazımdır. `vendor_id` sürücü deyil, provayder (şirkət) kodudur.
+
+
+
